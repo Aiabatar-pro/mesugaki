@@ -12,10 +12,11 @@ import os
 import sys
 import wave
 
-import google.generativeai as genai
 import requests
 import speech_recognition as sr
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 
 # .envファイルの読み込み
 load_dotenv()
@@ -97,15 +98,16 @@ class STTHandler:
 
 
 class GeminiHandler:
-    """Gemini API を使ったチャット"""
+    """Gemini API を使ったチャット（google-genai SDK）"""
 
     def __init__(self, api_key, system_prompt):
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
-            system_instruction=system_prompt,
+        self.client = genai.Client(api_key=api_key)
+        self.chat = self.client.chats.create(
+            model="gemini-2.0-flash",
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+            ),
         )
-        self.chat = self.model.start_chat(history=[])
 
     def send_message(self, text):
         """メッセージを送信してAI応答を取得する"""
