@@ -29,6 +29,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 VOICEVOX_HOST = os.getenv("VOICEVOX_HOST", "http://localhost:50021")
 VOICEVOX_SPEAKER_ID = int(os.getenv("VOICEVOX_SPEAKER_ID", "0"))
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ja-JP")
+VIRTUAL_CABLE_NAME = os.getenv("VIRTUAL_CABLE_NAME", "CABLE Input")
 
 # メスガキのシステムプロンプト
 SYSTEM_PROMPT = """\
@@ -127,11 +128,15 @@ class GeminiHandler:
 class VoicevoxHandler:
     """VOICEVOX を使った音声合成"""
 
-    def __init__(self, host="http://localhost:50021", speaker_id=0):
+    def __init__(self, host="http://localhost:50021", speaker_id=0,
+                 virtual_cable_name="CABLE Input"):
         self.host = host
         self.speaker_id = speaker_id
+        self.virtual_cable_name = virtual_cable_name
         # PyAudioは音声再生時にのみimportする
         self._pyaudio = None
+        self._cable_device_index = None
+        self._cable_searched = False
 
     @property
     def pyaudio_instance(self):
@@ -140,6 +145,26 @@ class VoicevoxHandler:
 
             self._pyaudio = pyaudio.PyAudio()
         return self._pyaudio
+
+    def find_cable_device(self):
+        """VB-Audio Virtual Cable（CABLE Input）のデバイスインデックスを検索する"""
+        if self._cable_searched:
+            return self._cable_device_index
+
+        self._cable_searched = True
+        pa = self.pyaudio_instance
+        for i in range(pa.get_device_count()):
+            info = pa.get_device_info_by_index(i)
+            name = info.get("name", "")
+            if self.virtual_cable_name.lower() in name.lower() and info["maxOutputChannels"] > 0:
+                self._cable_device_index = i
+                print(f"🔌 仮想ケーブル検出: [{i}] {name}")
+                return self._cable_device_index
+
+        print(f"⚠️  仮想ケーブル '{self.virtual_cable_name}' が見つかりません。")
+        print("   VB-Audio Virtual Cableがインストールされているか確認してください。")
+        print("   スピーカーのみで再生します。")
+        return None
 
     def check_connection(self):
         """VOICEVOXへの接続を確認する"""
@@ -176,23 +201,55 @@ class VoicevoxHandler:
         synth_resp.raise_for_status()
         return synth_resp.content
 
+    def _open_stream(self, pa, wf, device_index=None):
+        """指定デバイスへの出力ストリームを開く"""
+        kwargs = {
+            "format": pa.get_format_from_width(wf.getsampwidth()),
+            "channels": wf.getnchannels(),
+            "rate": wf.getframerate(),
+            "output": True,
+        }
+        if device_index is not None:
+            kwargs["output_device_index"] = device_index
+        return pa.open(**kwargs)
+
     def play_audio(self, audio_data):
-        """WAV音声データを再生する（3teneがこの音声でリップシンクする）"""
+        """WAV音声データをスピーカーと仮想ケーブルの両方に同時再生する"""
         pa = self.pyaudio_instance
-        with wave.open(io.BytesIO(audio_data), "rb") as wf:
-            stream = pa.open(
-                format=pa.get_format_from_width(wf.getsampwidth()),
-                channels=wf.getnchannels(),
-                rate=wf.getframerate(),
-                output=True,
-            )
+        cable_index = self.find_cable_device()
+
+        # スピーカー用ストリーム
+        wf_speaker = wave.open(io.BytesIO(audio_data), "rb")
+        stream_speaker = self._open_stream(pa, wf_speaker)
+
+        # 仮想ケーブル用ストリーム（検出できた場合）
+        wf_cable = None
+        stream_cable = None
+        if cable_index is not None:
+            wf_cable = wave.open(io.BytesIO(audio_data), "rb")
+            stream_cable = self._open_stream(pa, wf_cable, cable_index)
+
+        try:
             chunk_size = 1024
-            data = wf.readframes(chunk_size)
-            while data:
-                stream.write(data)
-                data = wf.readframes(chunk_size)
-            stream.stop_stream()
-            stream.close()
+            while True:
+                data_speaker = wf_speaker.readframes(chunk_size)
+                if not data_speaker:
+                    break
+                stream_speaker.write(data_speaker)
+
+                if stream_cable is not None:
+                    data_cable = wf_cable.readframes(chunk_size)
+                    if data_cable:
+                        stream_cable.write(data_cable)
+        finally:
+            stream_speaker.stop_stream()
+            stream_speaker.close()
+            wf_speaker.close()
+            if stream_cable is not None:
+                stream_cable.stop_stream()
+                stream_cable.close()
+            if wf_cable is not None:
+                wf_cable.close()
 
     def speak(self, text):
         """テキストを音声合成して再生する"""
@@ -237,8 +294,12 @@ class MesugakiAI:
         print("🤖 Gemini API 接続OK")
 
         # VOICEVOX 初期化
-        self.voicevox = VoicevoxHandler(VOICEVOX_HOST, VOICEVOX_SPEAKER_ID)
+        self.voicevox = VoicevoxHandler(
+            VOICEVOX_HOST, VOICEVOX_SPEAKER_ID, VIRTUAL_CABLE_NAME
+        )
         self.voicevox_available = self.voicevox.check_connection()
+        if self.voicevox_available:
+            self.voicevox.find_cable_device()
 
         # STT 初期化（音声モードのみ）
         self.stt = None
