@@ -1,5 +1,5 @@
 """
-メスガキAI - 3tene VRMアバター + VOICEVOX + STT + Gemini API 対話システム
+メスガキAI - 音声対話アバターシステム
 
 使い方:
   python mesugaki.py          # 音声対話モード
@@ -12,26 +12,22 @@ import os
 import sys
 import wave
 
+import pyaudio
 import requests
 import speech_recognition as sr
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-# .envファイルの読み込み
 load_dotenv()
 
-# ============================================================
 # 設定
-# ============================================================
-
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 VOICEVOX_HOST = os.getenv("VOICEVOX_HOST", "http://localhost:50021")
 VOICEVOX_SPEAKER_ID = int(os.getenv("VOICEVOX_SPEAKER_ID", "0"))
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ja-JP")
 VIRTUAL_CABLE_NAME = os.getenv("VIRTUAL_CABLE_NAME", "CABLE Input")
 
-# メスガキのシステムプロンプト
 SYSTEM_PROMPT = """\
 あなたは「メスガキ」というキャラクターです。
 以下の特徴を持って会話してください：
@@ -52,337 +48,210 @@ SYSTEM_PROMPT = """\
 """
 
 
-# ============================================================
-# STT（Speech-to-Text）
-# ============================================================
+# --- 仮想ケーブル検出 ---
+
+def find_cable_device(pa):
+    """CABLE Inputのデバイス番号を探す。見つからなければNone"""
+    for i in range(pa.get_device_count()):
+        info = pa.get_device_info_by_index(i)
+        if VIRTUAL_CABLE_NAME.lower() in info["name"].lower() and info["maxOutputChannels"] > 0:
+            print(f"🔌 仮想ケーブル検出: [{i}] {info['name']}")
+            return i
+    print(f"⚠️  '{VIRTUAL_CABLE_NAME}' が見つかりません。スピーカーのみで再生します。")
+    return None
 
 
-class STTHandler:
-    """Google Speech Recognition を使った音声認識"""
+# --- STT（音声→テキスト） ---
 
-    def __init__(self, language="ja-JP"):
-        self.recognizer = sr.Recognizer()
-        self.microphone = sr.Microphone()
-        self.language = language
-
-        # 環境音の調整
-        with self.microphone as source:
-            print("🎤 環境音を調整中...")
-            self.recognizer.adjust_for_ambient_noise(source, duration=1)
-        print("🎤 マイク準備完了！")
-
-    def listen(self):
-        """マイクから音声を取得してテキストに変換する"""
-        with self.microphone as source:
-            print("\n（話してください...）")
-            try:
-                audio = self.recognizer.listen(
-                    source, timeout=10, phrase_time_limit=30
-                )
-                text = self.recognizer.recognize_google(
-                    audio, language=self.language
-                )
-                return text
-            except sr.WaitTimeoutError:
-                return None
-            except sr.UnknownValueError:
-                print("（聞き取れませんでした）")
-                return None
-            except sr.RequestError as e:
-                print(f"STTエラー: {e}")
-                return None
+def setup_microphone():
+    """マイクを初期化して (recognizer, microphone) を返す"""
+    recognizer = sr.Recognizer()
+    mic = sr.Microphone()
+    with mic as source:
+        print("🎤 環境音を調整中...")
+        recognizer.adjust_for_ambient_noise(source, duration=1)
+    print("🎤 マイク準備完了！")
+    return recognizer, mic
 
 
-# ============================================================
-# Gemini API
-# ============================================================
-
-
-class GeminiHandler:
-    """Gemini API を使ったチャット（google-genai SDK）"""
-
-    def __init__(self, api_key, system_prompt):
-        self.client = genai.Client(api_key=api_key)
-        self.chat = self.client.chats.create(
-            model="gemini-2.0-flash",
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-            ),
-        )
-
-    def send_message(self, text):
-        """メッセージを送信してAI応答を取得する"""
+def listen(recognizer, mic):
+    """マイクから音声を取得してテキストに変換する"""
+    with mic as source:
+        print("\n（話してください...）")
         try:
-            response = self.chat.send_message(text)
-            return response.text
-        except Exception as e:
-            print(f"Gemini APIエラー: {e}")
-            return "あれ、ちょっと調子悪いかも... もう一回言って？♡"
+            audio = recognizer.listen(source, timeout=10, phrase_time_limit=30)
+            return recognizer.recognize_google(audio, language=STT_LANGUAGE)
+        except sr.WaitTimeoutError:
+            return None
+        except sr.UnknownValueError:
+            print("（聞き取れませんでした）")
+            return None
+        except sr.RequestError as e:
+            print(f"STTエラー: {e}")
+            return None
 
 
-# ============================================================
-# VOICEVOX（Text-to-Speech）
-# ============================================================
+# --- VOICEVOX（テキスト→音声） ---
+
+def voicevox_synthesize(text):
+    """テキストからWAV音声データを生成する"""
+    query = requests.post(
+        f"{VOICEVOX_HOST}/audio_query",
+        params={"text": text, "speaker": VOICEVOX_SPEAKER_ID},
+        timeout=30,
+    ).json()
+    resp = requests.post(
+        f"{VOICEVOX_HOST}/synthesis",
+        params={"speaker": VOICEVOX_SPEAKER_ID},
+        json=query,
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.content
 
 
-class VoicevoxHandler:
-    """VOICEVOX を使った音声合成"""
+def play_audio(pa, audio_data, cable_index):
+    """スピーカーとCABLE Inputの両方に音声を再生する"""
+    wf_speaker = wave.open(io.BytesIO(audio_data), "rb")
+    fmt = pa.get_format_from_width(wf_speaker.getsampwidth())
+    ch = wf_speaker.getnchannels()
+    rate = wf_speaker.getframerate()
 
-    def __init__(self, host="http://localhost:50021", speaker_id=0,
-                 virtual_cable_name="CABLE Input"):
-        self.host = host
-        self.speaker_id = speaker_id
-        self.virtual_cable_name = virtual_cable_name
-        # PyAudioは音声再生時にのみimportする
-        self._pyaudio = None
-        self._cable_device_index = None
-        self._cable_searched = False
+    stream_speaker = pa.open(format=fmt, channels=ch, rate=rate, output=True)
 
-    @property
-    def pyaudio_instance(self):
-        if self._pyaudio is None:
-            import pyaudio
+    # 仮想ケーブルが見つかっていれば同時出力
+    wf_cable = None
+    stream_cable = None
+    if cable_index is not None:
+        wf_cable = wave.open(io.BytesIO(audio_data), "rb")
+        stream_cable = pa.open(format=fmt, channels=ch, rate=rate,
+                               output=True, output_device_index=cable_index)
 
-            self._pyaudio = pyaudio.PyAudio()
-        return self._pyaudio
-
-    def find_cable_device(self):
-        """VB-Audio Virtual Cable（CABLE Input）のデバイスインデックスを検索する"""
-        if self._cable_searched:
-            return self._cable_device_index
-
-        self._cable_searched = True
-        pa = self.pyaudio_instance
-        for i in range(pa.get_device_count()):
-            info = pa.get_device_info_by_index(i)
-            name = info.get("name", "")
-            if self.virtual_cable_name.lower() in name.lower() and info["maxOutputChannels"] > 0:
-                self._cable_device_index = i
-                print(f"🔌 仮想ケーブル検出: [{i}] {name}")
-                return self._cable_device_index
-
-        print(f"⚠️  仮想ケーブル '{self.virtual_cable_name}' が見つかりません。")
-        print("   VB-Audio Virtual Cableがインストールされているか確認してください。")
-        print("   スピーカーのみで再生します。")
-        return None
-
-    def check_connection(self):
-        """VOICEVOXへの接続を確認する"""
-        try:
-            resp = requests.get(f"{self.host}/version", timeout=3)
-            resp.raise_for_status()
-            print(f"🔊 VOICEVOX 接続OK (version: {resp.text})")
-            return True
-        except requests.ConnectionError:
-            print(
-                "⚠️  VOICEVOXに接続できません。"
-                "VOICEVOXを起動してから再実行してください。"
-            )
-            return False
-
-    def synthesize(self, text):
-        """テキストから音声データ(WAV)を生成する"""
-        # 音声クエリの作成
-        query_resp = requests.post(
-            f"{self.host}/audio_query",
-            params={"text": text, "speaker": self.speaker_id},
-            timeout=30,
-        )
-        query_resp.raise_for_status()
-        query = query_resp.json()
-
-        # 音声合成
-        synth_resp = requests.post(
-            f"{self.host}/synthesis",
-            params={"speaker": self.speaker_id},
-            json=query,
-            timeout=60,
-        )
-        synth_resp.raise_for_status()
-        return synth_resp.content
-
-    def _open_stream(self, pa, wf, device_index=None):
-        """指定デバイスへの出力ストリームを開く"""
-        kwargs = {
-            "format": pa.get_format_from_width(wf.getsampwidth()),
-            "channels": wf.getnchannels(),
-            "rate": wf.getframerate(),
-            "output": True,
-        }
-        if device_index is not None:
-            kwargs["output_device_index"] = device_index
-        return pa.open(**kwargs)
-
-    def play_audio(self, audio_data):
-        """WAV音声データをスピーカーと仮想ケーブルの両方に同時再生する"""
-        pa = self.pyaudio_instance
-        cable_index = self.find_cable_device()
-
-        # スピーカー用ストリーム
-        wf_speaker = wave.open(io.BytesIO(audio_data), "rb")
-        stream_speaker = self._open_stream(pa, wf_speaker)
-
-        # 仮想ケーブル用ストリーム（検出できた場合）
-        wf_cable = None
-        stream_cable = None
-        if cable_index is not None:
-            wf_cable = wave.open(io.BytesIO(audio_data), "rb")
-            stream_cable = self._open_stream(pa, wf_cable, cable_index)
-
-        try:
-            chunk_size = 1024
-            while True:
-                data_speaker = wf_speaker.readframes(chunk_size)
-                if not data_speaker:
-                    break
-                stream_speaker.write(data_speaker)
-
-                if stream_cable is not None:
-                    data_cable = wf_cable.readframes(chunk_size)
-                    if data_cable:
-                        stream_cable.write(data_cable)
-        finally:
-            stream_speaker.stop_stream()
-            stream_speaker.close()
-            wf_speaker.close()
+    try:
+        while True:
+            data = wf_speaker.readframes(1024)
+            if not data:
+                break
+            stream_speaker.write(data)
             if stream_cable is not None:
-                stream_cable.stop_stream()
-                stream_cable.close()
-            if wf_cable is not None:
-                wf_cable.close()
+                stream_cable.write(wf_cable.readframes(1024))
+    finally:
+        stream_speaker.stop_stream()
+        stream_speaker.close()
+        wf_speaker.close()
+        if stream_cable is not None:
+            stream_cable.stop_stream()
+            stream_cable.close()
+        if wf_cable is not None:
+            wf_cable.close()
 
-    def speak(self, text):
-        """テキストを音声合成して再生する"""
+
+def speak(pa, text, cable_index):
+    """テキストを音声合成して再生する"""
+    try:
+        audio_data = voicevox_synthesize(text)
+        play_audio(pa, audio_data, cable_index)
+    except requests.ConnectionError:
+        print("⚠️  VOICEVOXに接続できません。")
+    except Exception as e:
+        print(f"VOICEVOX エラー: {e}")
+
+
+# --- メイン ---
+
+def main():
+    parser = argparse.ArgumentParser(description="メスガキAI")
+    parser.add_argument("--text", action="store_true", help="テキストモードで起動")
+    args = parser.parse_args()
+    text_mode = args.text
+
+    if not GEMINI_API_KEY:
+        print("エラー: GEMINI_API_KEY が設定されていません。")
+        print("  cp .env.example .env して API キーを設定してください。")
+        sys.exit(1)
+
+    print("=" * 50)
+    print("  メスガキAI 起動中...")
+    print("=" * 50)
+
+    # Gemini 初期化
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    chat = client.chats.create(
+        model="gemini-2.0-flash",
+        config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
+    )
+    print("🤖 Gemini API 接続OK")
+
+    # VOICEVOX 接続確認
+    voicevox_ok = False
+    try:
+        resp = requests.get(f"{VOICEVOX_HOST}/version", timeout=3)
+        resp.raise_for_status()
+        print(f"🔊 VOICEVOX 接続OK (version: {resp.text})")
+        voicevox_ok = True
+    except requests.ConnectionError:
+        print("⚠️  VOICEVOXに接続できません。音声なしで続行します。")
+
+    # PyAudio & 仮想ケーブル初期化
+    pa = pyaudio.PyAudio()
+    cable_index = find_cable_device(pa) if voicevox_ok else None
+
+    # マイク初期化（音声モードのみ）
+    recognizer, mic = None, None
+    if not text_mode:
         try:
-            audio_data = self.synthesize(text)
-            self.play_audio(audio_data)
-        except requests.ConnectionError:
-            print("⚠️  VOICEVOXに接続できません。VOICEVOXが起動しているか確認してください。")
-        except Exception as e:
-            print(f"VOICEVOX エラー: {e}")
+            recognizer, mic = setup_microphone()
+        except OSError as e:
+            print(f"⚠️  マイクが見つかりません: {e}")
+            print("テキストモードに切り替えます。")
+            text_mode = True
 
-    def cleanup(self):
-        """リソースを解放する"""
-        if self._pyaudio is not None:
-            self._pyaudio.terminate()
+    print("=" * 50)
+    print("  準備完了！")
+    print("=" * 50)
 
+    mode_str = "テキストモード" if text_mode else "音声モード"
+    print(f"\n💬 会話を開始します（{mode_str}）")
+    print("   終了するには Ctrl+C（テキストモードでは 'quit' も可）\n")
+    print("-" * 50)
 
-# ============================================================
-# メインアプリケーション
-# ============================================================
-
-
-class MesugakiAI:
-    """メスガキAI 対話システム"""
-
-    def __init__(self, text_mode=False):
-        if not GEMINI_API_KEY:
-            print("エラー: GEMINI_API_KEY が設定されていません。")
-            print(".env ファイルを作成して API キーを設定してください。")
-            print("  cp .env.example .env")
-            print("  # .env を編集して GEMINI_API_KEY を設定")
-            sys.exit(1)
-
-        self.text_mode = text_mode
-
-        print("=" * 50)
-        print("  メスガキAI 起動中...")
-        print("=" * 50)
-
-        # Gemini 初期化
-        self.gemini = GeminiHandler(GEMINI_API_KEY, SYSTEM_PROMPT)
-        print("🤖 Gemini API 接続OK")
-
-        # VOICEVOX 初期化
-        self.voicevox = VoicevoxHandler(
-            VOICEVOX_HOST, VOICEVOX_SPEAKER_ID, VIRTUAL_CABLE_NAME
-        )
-        self.voicevox_available = self.voicevox.check_connection()
-        if self.voicevox_available:
-            self.voicevox.find_cable_device()
-
-        # STT 初期化（音声モードのみ）
-        self.stt = None
-        if not text_mode:
-            try:
-                self.stt = STTHandler(language=STT_LANGUAGE)
-            except OSError as e:
-                print(f"⚠️  マイクが見つかりません: {e}")
-                print("テキストモードに切り替えます。")
-                self.text_mode = True
-
-        print("=" * 50)
-        print("  準備完了！")
-        print("=" * 50)
-
-    def get_user_input(self):
-        """ユーザー入力を取得する（音声 or テキスト）"""
-        if self.text_mode:
-            try:
-                text = input("\nあなた: ").strip()
-                return text if text else None
-            except EOFError:
-                return "quit"
-        else:
-            return self.stt.listen()
-
-    def run(self):
-        """メイン対話ループ"""
-        mode_str = "テキストモード" if self.text_mode else "音声モード"
-        print(f"\n💬 会話を開始します（{mode_str}）")
-
-        if not self.text_mode:
-            print("   3teneでリップシンク（音声入力）を有効にしてください。")
-            print("   VOICEVOXの音声出力を3teneが拾ってリップシンクします。")
-
-        print("   終了するには Ctrl+C（テキストモードでは 'quit' も可）\n")
-        print("-" * 50)
-
-        try:
-            while True:
-                # 1. ユーザー入力を取得
-                user_text = self.get_user_input()
-                if user_text is None:
+    try:
+        while True:
+            # 1. ユーザー入力を取得
+            if text_mode:
+                try:
+                    user_text = input("\nあなた: ").strip()
+                except EOFError:
+                    break
+                if not user_text:
                     continue
                 if user_text.lower() in ("quit", "exit", "終了"):
                     break
+            else:
+                user_text = listen(recognizer, mic)
+                if user_text is None:
+                    continue
+                print(f"あなた: {user_text}")
 
-                if not self.text_mode:
-                    print(f"あなた: {user_text}")
+            # 2. Gemini でAI応答を生成
+            try:
+                ai_response = chat.send_message(user_text).text
+            except Exception as e:
+                print(f"Gemini APIエラー: {e}")
+                ai_response = "あれ、ちょっと調子悪いかも... もう一回言って？♡"
+            print(f"メスガキ: {ai_response}")
 
-                # 2. Gemini でAI応答を生成
-                ai_response = self.gemini.send_message(user_text)
-                print(f"メスガキ: {ai_response}")
+            # 3. VOICEVOX で音声再生
+            if voicevox_ok:
+                speak(pa, ai_response, cable_index)
 
-                # 3. VOICEVOX で音声再生
-                if self.voicevox_available:
-                    self.voicevox.speak(ai_response)
+            print("-" * 50)
 
-                print("-" * 50)
-
-        except KeyboardInterrupt:
-            print("\n")
-        finally:
-            print("ばいばーい♡ またね！")
-            self.voicevox.cleanup()
-
-
-# ============================================================
-# エントリーポイント
-# ============================================================
-
-
-def main():
-    parser = argparse.ArgumentParser(description="メスガキAI - AI対話アバターシステム")
-    parser.add_argument(
-        "--text",
-        action="store_true",
-        help="テキストモードで起動（マイク不要）",
-    )
-    args = parser.parse_args()
-
-    ai = MesugakiAI(text_mode=args.text)
-    ai.run()
+    except KeyboardInterrupt:
+        print("\n")
+    finally:
+        print("ばいばーい♡ またね！")
+        pa.terminate()
 
 
 if __name__ == "__main__":
