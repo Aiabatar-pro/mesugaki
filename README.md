@@ -1,6 +1,6 @@
 # メスガキAI
 
-3tene VRMアバター + VOICEVOX + STT + Gemini API を連携させた対話AIアバターシステム。
+3tene VRMアバター + CoeiroInk + STT + Gemini API を連携させた対話AIアバターシステム。
 
 ## システム構成
 
@@ -9,7 +9,7 @@
                                             ↓
                                       Gemini API (AI応答生成)
                                             ↓
-                                      VOICEVOX (音声合成)
+                                      CoeiroInk (音声合成 - リリンちゃん メスガキ)
                                             ↓
                                       スピーカー再生 → 3tene (リップシンク)
 ```
@@ -17,7 +17,7 @@
 ## 必要なもの
 
 - Python 3.9以上
-- [VOICEVOX](https://voicevox.hiroshiba.jp/) （ローカルで起動しておく）
+- [CoeiroInk](https://coeiroink.com/) （ローカルで起動しておく）
 - [3tene](https://3tene.com/) + 自作VRMファイル
 - [Gemini API キー](https://aistudio.google.com/apikey)
 - マイク（音声モードの場合）
@@ -49,16 +49,16 @@ cp .env.example .env
 GEMINI_API_KEY=あなたのAPIキー
 ```
 
-### 3. VOICEVOXの起動
+### 3. CoeiroInkの起動
 
-VOICEVOXアプリケーションを起動してください（デフォルトで http://localhost:50021 で待機）。
+CoeiroInkアプリケーションを起動してください（デフォルトで http://localhost:50032 で待機）。
 
 ### 4. 3teneの設定
 
 1. 3teneを起動し、自作のVRMファイルを読み込む
 2. **リップシンク設定** → 「音声入力」を選択
 3. 音声入力デバイスをスピーカー出力（またはステレオミキサー/仮想オーディオデバイス）に設定
-   - これにより、VOICEVOXの音声出力でアバターの口が動くようになります
+   - これにより、CoeiroInkの音声出力でアバターの口が動くようになります
 
 > **ヒント**: VB-CABLEなどの仮想オーディオデバイスを使うと、スピーカーから音を出しつつ3teneにも音声を入力できます。
 
@@ -76,25 +76,20 @@ python mesugaki.py
 python mesugaki.py --text
 ```
 
-## VOICEVOXのスピーカー変更
+## CoeiroInkのスピーカー変更
 
-`.env` で `VOICEVOX_SPEAKER_ID` を変更すると声を変えられます。
+`.env` で `COEIROINK_SPEAKER_UUID` と `COEIROINK_STYLE_ID` を変更すると声を変えられます。
 
-| ID | キャラクター |
-|----|-------------|
-| 0  | 四国めたん（ノーマル） |
-| 1  | ずんだもん（ノーマル） |
-| 2  | 四国めたん（あまあま） |
-| 3  | ずんだもん（あまあま） |
+デフォルトは **リリンちゃん（メスガキ）** スタイルです。
 
-全スピーカー一覧は VOICEVOX 起動中に http://localhost:50021/speakers で確認できます。
+全スピーカー一覧は CoeiroInk 起動中に http://localhost:50032/v1/speakers で確認できます。
 
 ## トラブルシューティング
 
 | 症状 | 対処法 |
 |------|--------|
 | `GEMINI_API_KEY が設定されていません` | `.env` ファイルにAPIキーを設定してください |
-| `VOICEVOXに接続できません` | VOICEVOXアプリを起動してください |
+| `CoeiroInkに接続できません` | CoeiroInkアプリを起動してください |
 | `マイクが見つかりません` | マイクを接続するか `--text` モードを使用してください |
 | `PyAudio インストールエラー` | PortAudioをインストールしてから再実行してください |
 | 3teneの口が動かない | リップシンクの音声入力デバイス設定を確認してください |

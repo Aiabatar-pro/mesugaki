@@ -23,8 +23,11 @@ load_dotenv()
 
 # 設定
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-VOICEVOX_HOST = os.getenv("VOICEVOX_HOST", "http://localhost:50021")
-VOICEVOX_SPEAKER_ID = int(os.getenv("VOICEVOX_SPEAKER_ID", "0"))
+COEIROINK_HOST = os.getenv("COEIROINK_HOST", "http://localhost:50032")
+COEIROINK_SPEAKER_UUID = os.getenv(
+    "COEIROINK_SPEAKER_UUID", "cb11bdbd-78fc-4f16-b528-a400bae1782d"
+)
+COEIROINK_STYLE_ID = int(os.getenv("COEIROINK_STYLE_ID", "92"))
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ja-JP")
 VIRTUAL_CABLE_NAME = os.getenv("VIRTUAL_CABLE_NAME", "CABLE Input")
 
@@ -91,19 +94,33 @@ def listen(recognizer, mic):
             return None
 
 
-# --- VOICEVOX（テキスト→音声） ---
+# --- CoeiroInk（テキスト→音声） ---
 
-def voicevox_synthesize(text):
-    """テキストからWAV音声データを生成する"""
-    query = requests.post(
-        f"{VOICEVOX_HOST}/audio_query",
-        params={"text": text, "speaker": VOICEVOX_SPEAKER_ID},
+def coeiroink_synthesize(text):
+    """CoeiroInk v1 API でテキストからWAV音声データを生成する"""
+    # 1. 韻律推定
+    prosody = requests.post(
+        f"{COEIROINK_HOST}/v1/estimate_prosody",
+        json={"text": text},
         timeout=30,
     ).json()
+
+    # 2. 音声合成
     resp = requests.post(
-        f"{VOICEVOX_HOST}/synthesis",
-        params={"speaker": VOICEVOX_SPEAKER_ID},
-        json=query,
+        f"{COEIROINK_HOST}/v1/synthesis",
+        json={
+            "speakerUuid": COEIROINK_SPEAKER_UUID,
+            "styleId": COEIROINK_STYLE_ID,
+            "text": text,
+            "prosodyDetail": prosody["detail"],
+            "speedScale": 1.0,
+            "volumeScale": 1.0,
+            "pitchScale": 0.0,
+            "intonationScale": 1.0,
+            "prePhonemeLength": 0.1,
+            "postPhonemeLength": 0.5,
+            "outputSamplingRate": 44100,
+        },
         timeout=60,
     )
     resp.raise_for_status()
@@ -149,12 +166,12 @@ def play_audio(pa, audio_data, cable_index):
 def speak(pa, text, cable_index):
     """テキストを音声合成して再生する"""
     try:
-        audio_data = voicevox_synthesize(text)
+        audio_data = coeiroink_synthesize(text)
         play_audio(pa, audio_data, cable_index)
     except requests.ConnectionError:
-        print("⚠️  VOICEVOXに接続できません。")
+        print("⚠️  CoeiroInkに接続できません。")
     except Exception as e:
-        print(f"VOICEVOX エラー: {e}")
+        print(f"CoeiroInk エラー: {e}")
 
 
 # --- メイン ---
@@ -182,19 +199,19 @@ def main():
     )
     print("🤖 Gemini API 接続OK")
 
-    # VOICEVOX 接続確認
-    voicevox_ok = False
+    # CoeiroInk 接続確認
+    coeiroink_ok = False
     try:
-        resp = requests.get(f"{VOICEVOX_HOST}/version", timeout=3)
+        resp = requests.get(f"{COEIROINK_HOST}/v1/speakers", timeout=5)
         resp.raise_for_status()
-        print(f"🔊 VOICEVOX 接続OK (version: {resp.text})")
-        voicevox_ok = True
+        print("🔊 CoeiroInk 接続OK（リリンちゃん メスガキ）")
+        coeiroink_ok = True
     except requests.ConnectionError:
-        print("⚠️  VOICEVOXに接続できません。音声なしで続行します。")
+        print("⚠️  CoeiroInkに接続できません。音声なしで続行します。")
 
     # PyAudio & 仮想ケーブル初期化
     pa = pyaudio.PyAudio()
-    cable_index = find_cable_device(pa) if voicevox_ok else None
+    cable_index = find_cable_device(pa) if coeiroink_ok else None
 
     # マイク初期化（音声モードのみ）
     recognizer, mic = None, None
@@ -241,8 +258,8 @@ def main():
                 ai_response = "あれ、ちょっと調子悪いかも... もう一回言って？♡"
             print(f"メスガキ: {ai_response}")
 
-            # 3. VOICEVOX で音声再生
-            if voicevox_ok:
+            # 3. CoeiroInk で音声再生
+            if coeiroink_ok:
                 speak(pa, ai_response, cable_index)
 
             print("-" * 50)
