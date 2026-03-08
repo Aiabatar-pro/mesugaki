@@ -54,15 +54,18 @@ SYSTEM_PROMPT = """\
 # --- 仮想ケーブル検出 ---
 
 def find_cable_device(pa):
-    """CABLE Inputのデバイス番号を探す。見つからなければNone"""
+    print("--- 仮想ケーブル検出 ---")
     for i in range(pa.get_device_count()):
         info = pa.get_device_info_by_index(i)
-        if VIRTUAL_CABLE_NAME.lower() in info["name"].lower() and info["maxOutputChannels"] > 0:
-            print(f"🔌 仮想ケーブル検出: [{i}] {info['name']}")
+        name = info["name"]
+        
+        # 名前の中に「VB-Audio Virtual」が含まれていて、かつ出力可能(音が出せる)デバイスかチェック
+        if "VB-Audio Virtual" in name and info["maxOutputChannels"] > 0:
+            print(f"仮想ケーブルを発見しました: インデックス {i} ({name})")
             return i
-    print(f"⚠️  '{VIRTUAL_CABLE_NAME}' が見つかりません。スピーカーのみで再生します。")
+            
+    print("仮想ケーブルが見つかりませんでした。")
     return None
-
 
 # --- STT（音声→テキスト） ---
 
@@ -194,7 +197,7 @@ def main():
     # Gemini 初期化
     client = genai.Client(api_key=GEMINI_API_KEY)
     chat = client.chats.create(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
     )
     print("🤖 Gemini API 接続OK")
