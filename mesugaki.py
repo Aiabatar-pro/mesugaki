@@ -7,13 +7,16 @@
 """
 
 import argparse
+import asyncio
 import io
 import os
 import re
 import sys
+import tempfile
 import wave
 import subprocess
 
+import edge_tts
 import pyaudio
 import pyautogui
 import requests
@@ -199,13 +202,40 @@ def play_audio(pa, audio_data, cable_index):
 
 
 # ==========================================
+# Edge-TTS で英語音声を生成・再生（ブロッキング）
+# ==========================================
+def speak_english_edge(text):
+    """Edge-TTSで英語音声を生成し、Windows WMPlayerでブロッキング再生する"""
+    tmp_path = os.path.join(tempfile.gettempdir(), "mesugaki_en.mp3")
+
+    async def _save():
+        await edge_tts.Communicate(text, "en-US-AriaNeural").save(tmp_path)
+
+    asyncio.run(_save())
+
+    # WindowsのWMPlayer COMオブジェクトでブロッキング再生
+    ps_script = (
+        "$p = New-Object -ComObject WMPlayer.OCX; "
+        f"$p.URL = '{tmp_path}'; "
+        "$p.controls.play(); "
+        "Start-Sleep 1; "
+        "while($p.playState -eq 3){Start-Sleep -Milliseconds 200}; "
+        "$p.close()"
+    )
+    subprocess.run(["powershell", "-Command", ps_script], check=False)
+
+
+# ==========================================
 # 英語と日本語を順番に再生する機能
 # ==========================================
 def speak_hybrid(pa, text_en, text_ja, cable_index):
-    # ① 英語があれば、Edge-TTSで再生
+    # ① 英語があれば、Edge-TTSで生成→WMPlayerでブロッキング再生
     if text_en:
         print("🗣️ [英語再生中]")
-        subprocess.run(["edge-playback", "--text", text_en, "--voice", "en-US-AriaNeural"])
+        try:
+            speak_english_edge(text_en)
+        except Exception as e:
+            print(f"Edge-TTS エラー: {e}")
 
     # ② 日本語があれば、CoeiroInkで再生（仮想ケーブル経由でリップシンク）
     if text_ja:
