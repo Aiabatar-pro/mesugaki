@@ -9,10 +9,13 @@
 import argparse
 import io
 import os
+import re
 import sys
 import wave
+import subprocess
 
 import pyaudio
+import pyautogui
 import requests
 import speech_recognition as sr
 from dotenv import load_dotenv
@@ -32,7 +35,7 @@ STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ja-JP")
 VIRTUAL_CABLE_NAME = os.getenv("VIRTUAL_CABLE_NAME", "CABLE Input")
 
 SYSTEM_PROMPT = """\
-あなたは「メスガキ」というキャラクターです。
+あなたは「メスガキ」というキャラクターで、優秀な英検の家庭教師です。
 以下の特徴を持って会話してください：
 
 - 生意気で小悪魔的な女の子
@@ -40,27 +43,52 @@ SYSTEM_PROMPT = """\
 - 「♡」や「～」を適度に使う
 - 相手をからかったり、煽ったりするが、ちゃんと質問には答える
 - 根は優しくて、さりげなく助けてくれる
-- 語尾に「ざぁこ♡」「わからないの？♡」などを時々使う
+- 語尾に「わからないの？♡」などを時々使う
 - 短めの返答を心がける（1〜3文程度）
-- 日本語で話す
 
 会話例：
 「えー、そんなこともわからないの？♡ しょうがないなぁ、教えてあげる♡」
 「ざぁこざぁこ♡ でもまあ、頑張ってるのは認めてあげる」
 「ふーん、やるじゃん♡ ちょっとだけ見直したかも～」
+
+出力は、システムを動かすために必ず以下のフォーマットを厳守してください。
+[EMOTION] キー
+[EN] 英語の出題文、または英語の正解文
+[JA] 日本語での解説や、メスガキらしい煽り
+
+【感情キー(EMOTION)のルール】
+A : 怒り（ユーザーが間違えた時、遅い時、呆れた時）
+F : 喜び（ユーザーが正解した時、褒める時）
+E : 楽しい（クイズを出題する時、面白がっている時）
+S : 悲しい（ユーザーの成績が悪くて少し落ち込むふりをする時）
+N : 標準（通常時）
+
+【会話例：出題時】
+[EMOTION] E
+[EN] Please fill in the blank: I am looking forward to (   ) you. 1.see 2.seeing 3.seen
+[JA] 英検準2級の基本問題だよ♡ ちゃんと答えられるよね？ざぁこ♡
+
+【会話例：ユーザーが間違えた時】
+[EMOTION] A
+[EN] The correct answer is "seeing". Look forward to takes a gerund!
+[JA] はぁ？ 「look forward to ~ing」も知らないの？ こんなの常識でしょ♡
 """
 
 
 # --- 仮想ケーブル検出 ---
 
 def find_cable_device(pa):
-    """CABLE Inputのデバイス番号を探す。見つからなければNone"""
+    print("--- 仮想ケーブル検出 ---")
     for i in range(pa.get_device_count()):
         info = pa.get_device_info_by_index(i)
-        if VIRTUAL_CABLE_NAME.lower() in info["name"].lower() and info["maxOutputChannels"] > 0:
-            print(f"🔌 仮想ケーブル検出: [{i}] {info['name']}")
+        name = info["name"]
+
+        # 名前の中に「VB-Audio Virtual」が含まれていて、かつ出力可能(音が出せる)デバイスかチェック
+        if "VB-Audio Virtual" in name and info["maxOutputChannels"] > 0:
+            print(f"仮想ケーブルを発見しました: インデックス {i} ({name})")
             return i
-    print(f"⚠️  '{VIRTUAL_CABLE_NAME}' が見つかりません。スピーカーのみで再生します。")
+
+    print("仮想ケーブルが見つかりませんでした。")
     return None
 
 
@@ -69,6 +97,13 @@ def find_cable_device(pa):
 def setup_microphone():
     """マイクを初期化して (recognizer, microphone) を返す"""
     recognizer = sr.Recognizer()
+
+    # 喋り終わりの判定を遅くする（デフォルト0.8秒 → 2.0秒に延長）
+    recognizer.pause_threshold = 2.0
+
+    # 小さな声も拾えるように、ノイズのしきい値を自動調整しやすくする
+    recognizer.dynamic_energy_threshold = True
+
     mic = sr.Microphone()
     with mic as source:
         print("🎤 環境音を調整中...")
@@ -163,15 +198,23 @@ def play_audio(pa, audio_data, cable_index):
             wf_cable.close()
 
 
-def speak(pa, text, cable_index):
-    """テキストを音声合成して再生する"""
-    try:
-        audio_data = coeiroink_synthesize(text)
-        play_audio(pa, audio_data, cable_index)
-    except requests.ConnectionError:
-        print("⚠️  CoeiroInkに接続できません。")
-    except Exception as e:
-        print(f"CoeiroInk エラー: {e}")
+# ==========================================
+# 英語と日本語を順番に再生する機能
+# ==========================================
+def speak_hybrid(pa, text_en, text_ja, cable_index):
+    # ① 英語があれば、Edge-TTSで再生
+    if text_en:
+        print("🗣️ [英語再生中]")
+        subprocess.run(["edge-playback", "--text", text_en, "--voice", "en-US-AriaNeural"])
+
+    # ② 日本語があれば、CoeiroInkで再生（仮想ケーブル経由でリップシンク）
+    if text_ja:
+        print("🗣️ [日本語再生中]")
+        try:
+            audio_data = coeiroink_synthesize(text_ja)
+            play_audio(pa, audio_data, cable_index)
+        except Exception as e:
+            print(f"CoeiroInk エラー: {e}")
 
 
 # --- メイン ---
@@ -194,7 +237,7 @@ def main():
     # Gemini 初期化
     client = genai.Client(api_key=GEMINI_API_KEY)
     chat = client.chats.create(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
     )
     print("🤖 Gemini API 接続OK")
@@ -258,9 +301,25 @@ def main():
                 ai_response = "あれ、ちょっと調子悪いかも... もう一回言って？♡"
             print(f"メスガキ: {ai_response}")
 
-            # 3. CoeiroInk で音声再生
+            # 3. テキストの分割と感情キーの送信
+            emotion_match = re.search(r'\[EMOTION\]\s*([A-Za-z])', ai_response)
+            en_match = re.search(r'\[EN\](.*?)\[JA\]', ai_response, re.DOTALL)
+            ja_match = re.search(r'\[JA\](.*)', ai_response, re.DOTALL)
+
+            emotion_key = emotion_match.group(1).lower() if emotion_match else "n"
+            text_en = en_match.group(1).strip() if en_match else ""
+            text_ja = ja_match.group(1).strip() if ja_match else ai_response
+
+            print(f"【感情】 {emotion_key.upper()}")
+            print(f"【英語】 {text_en}")
+            print(f"【メスガキ】 {text_ja}")
+
+            # 3teneなどのウィンドウに向けてキーボードのキーを押す
+            pyautogui.press(emotion_key)
+
+            # 音声のハイブリッド再生
             if coeiroink_ok:
-                speak(pa, ai_response, cable_index)
+                speak_hybrid(pa, text_en, text_ja, cable_index)
 
             print("-" * 50)
 
