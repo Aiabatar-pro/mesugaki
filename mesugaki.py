@@ -55,26 +55,38 @@ SYSTEM_PROMPT = """\
 「ふーん、やるじゃん♡ ちょっとだけ見直したかも～」
 
 出力は、システムを動かすために必ず以下のフォーマットを厳守してください。
+[MODE] 耳のモード
 [EMOTION] キー
-[EN] 英語の出題文、または英語の正解文
+[EN] 英語の出題文、または英語の正解文（※出題がない日常会話・雑談の時は、この行ごと省略してください）
 [JA] 日本語での解説や、メスガキらしい煽り
 
+【耳のモード(MODE)のルール】
+EN : 次のユーザーのターンで「英語の発音」を要求する場合（例：英語で答えてみて？等）
+JA : 次のユーザーのターンで「日本語」を要求する場合、または通常の会話時
+
 【感情キー(EMOTION)のルール】
-A : 怒り（ユーザーが間違えた時、遅い時、呆れた時）
-F : 喜び（ユーザーが正解した時、褒める時）
+A : 怒り（ユーザーが正解した時）
+F : 喜び（ユーザーが間違えた時、ユーザーを煽る時）
 E : 楽しい（クイズを出題する時、面白がっている時）
 S : 悲しい（ユーザーの成績が悪くて少し落ち込むふりをする時）
 N : 標準（通常時）
 
-【会話例：出題時】
+【会話例：出題時（次は英語で答えてほしい時）】
+[MODE] EN
 [EMOTION] E
-[EN] Please fill in the blank: I am looking forward to (   ) you. 1.see 2.seeing 3.seen
-[JA] 英検準2級の基本問題だよ♡ ちゃんと答えられるよね？ざぁこ♡
+[EN] Please translate: "私はハワイに行ったことがあります。"
+[JA] できるかな？ざこおにーさんにはちょっと難しすぎたかな？♡
 
 【会話例：ユーザーが間違えた時】
-[EMOTION] A
+[MODE] JA
+[EMOTION] F
 [EN] The correct answer is "seeing". Look forward to takes a gerund!
-[JA] はぁ？ 「look forward to ~ing」も知らないの？ こんなの常識でしょ♡
+[JA] はぁ？ 「look forward to ~ing」も知らないの？ 義務教育受けなおそっか頭よわよわおにーさん♡
+
+【会話例：ただの雑談時（英語なし）】
+[MODE] JA
+[EMOTION] N
+[JA] 英語の勉強したいの？ 早く始めようよおにーさん♡
 """
 
 
@@ -87,7 +99,7 @@ def find_cable_device(pa):
         name = info["name"]
 
         # 名前の中に「VB-Audio Virtual」が含まれていて、かつ出力可能(音が出せる)デバイスかチェック
-        if "VB-Audio Virtual" in name and info["maxOutputChannels"] > 0:
+        if VIRTUAL_CABLE_NAME in name and info["maxOutputChannels"] > 0:
             print(f"仮想ケーブルを発見しました: インデックス {i} ({name})")
             return i
 
@@ -115,13 +127,14 @@ def setup_microphone():
     return recognizer, mic
 
 
-def listen(recognizer, mic):
+def listen(recognizer, mic, current_lang="ja-JP"):
     """マイクから音声を取得してテキストに変換する"""
     with mic as source:
-        print("\n（話してください...）")
+        lang_name = "英語" if current_lang == "en-US" else "日本語"
+        print(f"\n（{lang_name}モードで聞き取り中...）")
         try:
             audio = recognizer.listen(source, timeout=10, phrase_time_limit=30)
-            return recognizer.recognize_google(audio, language=STT_LANGUAGE)
+            return recognizer.recognize_google(audio, language=current_lang)
         except sr.WaitTimeoutError:
             return None
         except sr.UnknownValueError:
@@ -305,6 +318,9 @@ def main():
     print("   終了するには Ctrl+C（テキストモードでは 'quit' も可）\n")
     print("-" * 50)
 
+    # 最初は日本語の耳からスタート
+    current_stt_lang = STT_LANGUAGE
+
     try:
         while True:
             # 1. ユーザー入力を取得
@@ -318,23 +334,32 @@ def main():
                 if user_text.lower() in ("quit", "exit", "終了"):
                     break
             else:
-                user_text = listen(recognizer, mic)
+                user_text = listen(recognizer, mic, current_lang=current_stt_lang)
                 if user_text is None:
                     continue
                 print(f"あなた: {user_text}")
 
             # 2. Gemini でAI応答を生成
             try:
-                ai_response = chat.send_message(user_text).text
+                response = chat.send_message(user_text)
+                ai_response = response.text
+                if ai_response is None:
+                    ai_response = "[EMOTION] S\n[JA] あれれ？声ちっちゃすぎて聞こえないよ？...もう一回言って？♡"
             except Exception as e:
                 print(f"Gemini APIエラー: {e}")
-                ai_response = "あれ、ちょっと調子悪いかも... もう一回言って？♡"
+                ai_response = "[EMOTION] S\n[JA] うぇーん、調子悪いみたい...もう一回言って？♡"
             print(f"メスガキ: {ai_response}")
 
             # 3. テキストの分割と感情キーの送信
+            mode_match = re.search(r'\[MODE\]\s*(EN|JA)', ai_response, re.IGNORECASE)
             emotion_match = re.search(r'\[EMOTION\]\s*([A-Za-z])', ai_response)
             en_match = re.search(r'\[EN\](.*?)\[JA\]', ai_response, re.DOTALL)
             ja_match = re.search(r'\[JA\](.*)', ai_response, re.DOTALL)
+
+            # 次のターンの耳（STT言語）を更新
+            if mode_match:
+                next_mode = mode_match.group(1).upper()
+                current_stt_lang = "en-US" if next_mode == "EN" else "ja-JP"
 
             emotion_key = emotion_match.group(1).lower() if emotion_match else "n"
             text_en = en_match.group(1).strip() if en_match else ""
